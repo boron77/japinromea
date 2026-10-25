@@ -137,25 +137,44 @@ function onInput(){
   timer = setTimeout(() => translate(kana + (pending === 'n' ? 'ん' : ''), pending), 550);
 }
 
+const cache = new Map();
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function api(body){
+  const res = await fetch('/api/translate', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body), signal: ctrl.signal });
+  if (!res.ok) throw Object.assign(new Error('fail'), { code: res.status });
+  return res.json();
+}
+
 async function translate(kana, pending){
   if (pending && pending !== 'n'){ setStatus('입력이 끝나지 않은 음절이 있어요…'); return; }
   const text = kana.trim();
   if (text === lastSent) { setStatus(''); return; }
+  const hit = cache.get(text);
+  if (hit){ seq++; ctrl?.abort(); setOut(jaEl, hit.ja); setOut(koEl, hit.ko); renderKanji(hit.kanji); lastSent = text; setStatus(''); return; }
   ctrl?.abort(); ctrl = new AbortController();
   const my = ++seq;
   setStatus('<span class="dot"></span>번역 중…');
   try {
-    const res = await fetch('/api/translate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
-      signal: ctrl.signal
-    });
-    if (!res.ok){ const j = await res.json().catch(() => ({})); throw Object.assign(new Error(j.error || 'fail'), { code: res.status }); }
-    const data = await res.json();
-    if (my !== seq) return;                       // stale response: ignore
-    setOut(jaEl, data.ja); setOut(koEl, data.ko); renderKanji(data.kanji);
-    lastSent = text; setStatus('');
+    let data;
+    for (let attempt = 0; ; attempt++){            // 1 automatic retry
+      try { data = await api({ mode: 'main', text }); break; }
+      catch (e){
+        if (e?.name === 'AbortError' || my !== seq) return;
+        if (attempt >= 1 || e.code === 400) throw e;
+        await sleep(1200); if (my !== seq) return;
+      }
+    }
+    if (my !== seq) return;                         // stale response: ignore
+    setOut(jaEl, data.ja); setOut(koEl, data.ko); renderKanji([]);
+    lastSent = text;
+    setStatus('<span class="dot"></span>한자 주석 불러오는 중…');
+    let kanji = [];
+    try { kanji = (await api({ mode: 'kanji', ja: data.ja })).kanji || []; }
+    catch (e){ if (e?.name === 'AbortError' || my !== seq) return; }   // annotations are optional
+    if (my !== seq) return;
+    renderKanji(kanji);
+    cache.set(text, { ja: data.ja, ko: data.ko, kanji });
+    setStatus('');
   } catch (e){
     if (my !== seq || e?.name === 'AbortError') return;
     const msg = e?.code === 429 ? '요청이 많아요. 잠시 후 다시 입력해 주세요.'
